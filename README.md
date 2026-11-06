@@ -8,8 +8,14 @@
 
 ```js
 // ==UserScript==
-// @require      https://fastgit.cc/https://github.com/piaopiaosir/pp-font-decrypt/raw/v1.0.0/font-decrypt.js
+// @require      https://cdn.jsdelivr.net/gh/piaopiaosir/pp-font-decrypt@v1.0.1/font-decrypt.js
 // ==/UserScript==
+```
+
+国内访问不了 jsDelivr 时，换这一行（其余不变）：
+
+```js
+// @require      https://fastgit.cc/https://github.com/piaopiaosir/pp-font-decrypt/raw/v1.0.1/font-decrypt.js
 ```
 
 引入后全局可用 `window.FontDecrypt`：

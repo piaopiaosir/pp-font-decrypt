@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         font-decrypt
-// @namespace    https://github.com/piaopiaosir/font-decrypt
-// @version      1.0.0
+// @namespace    https://github.com/piaopiaosir/pp-font-decrypt
+// @version      1.0.1
 // @description  雨课堂 + 学习通 字体混淆解密库（供 @require 引用）
 // @author       piaopiaosir
 // @license      MIT
-// @homepage     https://github.com/piaopiaosir/font-decrypt
+// @homepage     https://github.com/piaopiaosir/pp-font-decrypt
 // ==/UserScript==
 
 (function (root) {
