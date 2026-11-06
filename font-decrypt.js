@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         font-decrypt
 // @namespace    https://github.com/piaopiaosir/pp-font-decrypt
-// @version      1.0.1
+// @version      1.0.2
 // @description  雨课堂 + 学习通 字体混淆解密库（供 @require 引用）
 // @author       piaopiaosir
 // @license      MIT
@@ -845,7 +845,7 @@ function readyMap() {
           var map = buildCxCharMap(el.ownerDocument);
           if (map) applyCxMap(clone, map);
         } else if (platform === 'ykt') {
-          var m = yktMap();
+          var m = readyMap();
           if (m) applyYktMap(clone, m);
         }
       } catch (e) {
