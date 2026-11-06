@@ -8,7 +8,7 @@
 
 ```js
 // ==UserScript==
-// @require      https://cdn.jsdelivr.net/gh/piaopiaosir/font-decrypt@v1.0.0/font-decrypt.js
+// @require      https://fastgit.cc/https://github.com/piaopiaosir/pp-font-decrypt/raw/v1.0.0/font-decrypt.js
 // ==/UserScript==
 ```
 
