@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         font-decrypt
 // @namespace    https://github.com/piaopiaosir/pp-font-decrypt
-// @version      1.0.2
+// @version      1.0.3
 // @description  雨课堂 + 学习通 字体混淆解密库（供 @require 引用）
 // @author       piaopiaosir
 // @license      MIT
@@ -235,7 +235,7 @@
   var Font_1 = Font;
   //#endregion
 
-  //#region 学习通 · 解密（原样，仅把表来源换成内嵌）
+  //#region 学习通 · 解密（v1.0.3：容错 + 自检）
   let _ppFontTableCache = null;
   function _ppGetFontTable() {
     if (_ppFontTableCache) return _ppFontTableCache;
@@ -254,29 +254,86 @@
     return out;
   }
 
+  /** 诊断信息挂在 doc 上，cxStats() 直接读，不改变任何解密行为 */
+  function setCxDiag(doc, diag) {
+    try {
+      if (doc) doc.__ppCipherDiag = diag;
+    } catch (e) {}
+  }
+
   /**
- * 建表（原 decodeCipherFont 的前半段，逻辑原样）
- * @returns {Object|undefined} 码点 -> 真字码点
- */
-function buildCxCharMap(doc) {
-    const styleNodes = doc.querySelectorAll("style");
-    let cipherStyle = null;
-    for (let i = 0; i < styleNodes.length; i++) {
-      if (styleNodes[i].textContent?.includes("font-cxsecret")) {
-        cipherStyle = styleNodes[i];
-        break;
-      }
+   * 找带混淆字体的 <style>。
+   *
+   * v1.0.2 只认「同一个 <style> 里同时出现 font-cxsecret 和 base64」。
+   * 学习通改版后会把 .font-cxsecret 规则和 @font-face 拆成两块 <style>，
+   * 那样旧逻辑会直接 return（解密静默失效，且不会移除 class），这里补两级兜底。
+   */
+  function findCipherStyle(doc) {
+    const styles = doc.querySelectorAll("style");
+    let classOnly = null;
+    let fontOnly = null;
+    for (let i = 0; i < styles.length; i++) {
+      const text = styles[i].textContent || "";
+      const hasClass = text.indexOf("font-cxsecret") !== -1;
+      const hasFont = text.indexOf("base64,") !== -1;
+      if (hasClass && hasFont) return styles[i];
+      if (hasClass && !classOnly) classOnly = styles[i];
+      if (!hasClass && hasFont && !fontOnly) fontOnly = styles[i];
     }
-    if (!cipherStyle) return;
-    const b64Match = cipherStyle.textContent?.match(/base64,([\w\W]+?)'/);
-    if (!b64Match) return;
-    const raw = window.atob(b64Match[1]);
+    // 类规则和字体拆成两块 <style>：字体块优先（解密靠的是字体）
+    if (fontOnly) return fontOnly;
+    return classOnly;
+  }
+
+  /** 取 base64 字体数据：单引号 / 双引号 / 无引号都认（base64 字母表不含引号） */
+  function readFontBase64(styleText) {
+    const match = String(styleText || "").match(/base64,([A-Za-z0-9+/=\s]+)/);
+    if (!match) return null;
+    const data = match[1].replace(/\s+/g, "");
+    return data || null;
+  }
+
+  /**
+   * 建表：码点 -> 真字码点
+   * @returns {Object|undefined} 失败时返回 undefined，并把原因写进 doc.__ppCipherDiag
+   */
+  function buildCxCharMap(doc) {
+    const cipherStyle = findCipherStyle(doc);
+    if (!cipherStyle) {
+      setCxDiag(doc, { ok: false, reason: "no-style", message: "没找到含 font-cxsecret / @font-face 的 <style>" });
+      return;
+    }
+    const fontData = readFontBase64(cipherStyle.textContent);
+    if (!fontData) {
+      setCxDiag(doc, { ok: false, reason: "no-base64", message: "样式里没有 base64 字体数据" });
+      return;
+    }
+    const encryptedEls = doc.querySelectorAll(".font-cxsecret");
+    if (!encryptedEls.length) {
+      setCxDiag(doc, { ok: false, reason: "no-target", message: "文档里没有 .font-cxsecret 节点" });
+      return;
+    }
+
+    let raw;
+    try {
+      raw = window.atob(fontData);
+    } catch (e) {
+      setCxDiag(doc, { ok: false, reason: "base64-decode", error: String((e && e.message) || e) });
+      return;
+    }
     const buf = new ArrayBuffer(raw.length);
     const bytes = new Uint8Array(buf);
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-    const fontObj = new Font_1(buf);
-    const encryptedEls = doc.querySelectorAll(".font-cxsecret");
-    if (!encryptedEls.length) return;
+
+    let fontObj;
+    try {
+      fontObj = new Font_1(buf);
+    } catch (e) {
+      // 字体换成 woff2 / 结构变化时 Typr 会抛错，旧版这里被 cxDecode 的 try 吞掉，完全查不到
+      setCxDiag(doc, { ok: false, reason: "font-parse", error: String((e && e.message) || e), bytes: bytes.length });
+      return;
+    }
+
     const ttfTable = _ppGetFontTable();
     const charMap = {};
     const pendingPoints = [];
@@ -291,12 +348,24 @@ function buildCxCharMap(doc) {
         }
       }
     }
+    const total = pendingPoints.length;
     pendingPoints.sort((a, b) => a - b);
+    let glyphErrors = 0;
+    let firstError = null;
     while (pendingPoints.length) {
       const codePoint = pendingPoints.shift();
-      const glyphId = fontObj.codeToGlyph(codePoint);
-      if (!glyphId) continue;
-      const pathData = fontObj.glyphToPath(glyphId);
+      let glyphId = 0;
+      let pathData = null;
+      try {
+        glyphId = fontObj.codeToGlyph(codePoint);
+        if (!glyphId) continue;
+        pathData = fontObj.glyphToPath(glyphId);
+      } catch (e) {
+        // 单个码点解析失败（生僻 cmap 格式等）不能拖垮整页，记下首个错误继续
+        glyphErrors++;
+        if (!firstError) firstError = String((e && e.message) || e);
+        continue;
+      }
       const signature = md5(JSON.stringify(pathData)).slice(24);
       charMap[codePoint] = ttfTable[signature];
       const decodedPoint = String.fromCharCode(charMap[codePoint]).charCodeAt(0);
@@ -307,20 +376,36 @@ function buildCxCharMap(doc) {
       }
     }
 
-  doc.__ppCipherCharMap = charMap;
-  return charMap;
-}
+    const mapped = Object.keys(charMap).filter((cp) => charMap[cp]).length;
+    doc.__ppCipherCharMap = charMap;
+    setCxDiag(doc, {
+      ok: mapped > 0,
+      reason: mapped > 0 ? null : glyphErrors > 0 ? "glyph-error" : "table-miss",
+      total: total,
+      mapped: mapped,
+      glyphErrors: glyphErrors,
+      error: firstError,
+      styleChars: (cipherStyle.textContent || "").length,
+      fontBytes: bytes.length,
+    });
+    return charMap;
+  }
 
-/**
- * 解密整个文档（原 decodeCipherFont 的写回段，逻辑原样）
- * 注意：这个会修改传入的 DOM。
- */
-function decodeCipherFont(doc) {
-  const charMap = buildCxCharMap(doc);
-  if (!charMap) return;
-  const encryptedEls = doc.querySelectorAll(".font-cxsecret");
-  if (!encryptedEls.length) return;
-  for (let i = 0; i < encryptedEls.length; i++) {
+  /**
+   * 解密整个文档（会修改传入的 DOM）
+   * @returns {{ok:boolean,mapped:number,total:number,leftover:number,reason?:string}}
+   */
+  function decodeCipherFont(doc) {
+    const charMap = buildCxCharMap(doc);
+    if (!charMap) {
+      const diag = (doc && doc.__ppCipherDiag) || {};
+      return { ok: false, mapped: 0, total: 0, leftover: doc ? doc.querySelectorAll(".font-cxsecret").length : 0, reason: diag.reason || "unknown", message: diag.message };
+    }
+    const encryptedEls = doc.querySelectorAll(".font-cxsecret");
+    if (!encryptedEls.length) {
+      return { ok: false, mapped: 0, total: 0, leftover: 0, reason: "no-target" };
+    }
+    for (let i = 0; i < encryptedEls.length; i++) {
       const el = encryptedEls[i];
       let text = el.innerHTML;
       for (const cp in charMap) {
@@ -331,8 +416,17 @@ function decodeCipherFont(doc) {
       el.innerHTML = text;
       el.classList.remove("font-cxsecret");
     }
-  doc.__ppCipherCharMap = charMap;
-}
+    doc.__ppCipherCharMap = charMap;
+    const diag = doc.__ppCipherDiag || {};
+    const leftover = doc.querySelectorAll(".font-cxsecret").length;
+    return {
+      ok: diag.ok === true && leftover === 0,
+      mapped: diag.mapped || 0,
+      total: diag.total || 0,
+      leftover: leftover,
+      reason: diag.ok === true ? (leftover === 0 ? null : "leftover") : diag.reason || "unknown",
+    };
+  }
 
   //#endregion
 
@@ -772,7 +866,7 @@ function readyMap() {
   // 对外 API
   // ============================================================
   var API = {
-    version: '1.0.0',
+    version: '1.0.3',
     tables: {
       cx: 'cx-resource-v2',
       ykt: 'shs-sc-2.004',
@@ -794,6 +888,15 @@ function readyMap() {
       } catch (e) {
         out().warn(LOG, '学习通解密失败：', e);
         return undefined;
+      }
+    },
+
+    /** 学习通：最近一次 decrypt 的诊断信息（失败原因 / 命中数） */
+    cxStats: function (d) {
+      try {
+        return (d || doc()).__ppCipherDiag || null;
+      } catch (e) {
+        return null;
       }
     },
 
